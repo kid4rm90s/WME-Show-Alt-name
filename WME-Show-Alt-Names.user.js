@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name            WME Show Alt Names
 // @description     Shows alt names for selected segments
-// @version         2026.04.16.01
+// @version         2026.04.16.02
 // @author          The_Cre8r / SAR85 / kid4rm89s
 // @copyright       SAR85 / The_Cre8r / kid4rm89s
 // @license         CC BY-NC-ND
@@ -39,6 +39,8 @@
         draggableSupported = true,
         nameArray = [],
         selectedSegments = [],
+        sdkEventSubscriptions = [], // Track SDK event subscriptions for cleanup
+        isInitialized = false, // Prevent duplicate initialization
         CSS = {
             altTable: {
                 width: '100%',
@@ -547,6 +549,7 @@
             SDK.Map.removeAllFeaturesFromLayer({ layerName: PRIMARY_LAYER });
             primaryFeatures.clear();
             segmentsWithAlternates = [];
+            nameArray = []; // Clear nameArray to prevent memory leak
             return;
         }
 
@@ -820,9 +823,9 @@
                 },
             ],
         });
-        SDK.Events.on({ eventName: 'wme-layer-visibility-changed', eventHandler: (e) => {
+        sdkEventSubscriptions.push(SDK.Events.on({ eventName: 'wme-layer-visibility-changed', eventHandler: (e) => {
             if (e?.layerName === PRIMARY_LAYER) checkSelection();
-        }});
+        }}));
 
         SDK.Map.addLayer({
             layerName: HIGHLIGHT_LAYER,
@@ -838,10 +841,10 @@
 
         AddLayerCheckbox('Scripts', 'Show Alt Names', true, changeLayerVisibility, null);
 
-        //register WME event listeners
-        SDK.Events.on({ eventName: 'wme-selection-changed', eventHandler: checkSelection });
-        SDK.Events.on({ eventName: 'wme-map-move-end', eventHandler: checkAllSegments });
-        SDK.Events.on({ eventName: 'wme-map-zoom-changed', eventHandler: checkAllSegments });
+        //register WME event listeners - track subscriptions for cleanup
+        sdkEventSubscriptions.push(SDK.Events.on({ eventName: 'wme-selection-changed', eventHandler: checkSelection }));
+        sdkEventSubscriptions.push(SDK.Events.on({ eventName: 'wme-map-move-end', eventHandler: checkAllSegments }));
+        sdkEventSubscriptions.push(SDK.Events.on({ eventName: 'wme-map-zoom-changed', eventHandler: checkAllSegments }));
 
         loadOptions();
         checkAllSegments();
@@ -852,6 +855,51 @@
         SDK.Map.setLayerVisibility({ layerName: PRIMARY_LAYER, visibility: checked });
         SDK.Map.setLayerVisibility({ layerName: HIGHLIGHT_LAYER, visibility: checked });
         saveOptions();
+    }
+
+    /**
+     * Cleanup function to prevent memory leaks on script reload/unload.
+     * Unsubscribes from all SDK events, clears DOM elements, and resets global state.
+     */
+    function cleanup() {
+        // Unsubscribe from all SDK events
+        sdkEventSubscriptions.forEach(subscription => {
+            if (subscription && typeof subscription.remove === 'function') {
+                subscription.remove();
+            }
+        });
+        sdkEventSubscriptions = [];
+
+        // Clear event listeners on DOM elements
+        if (altNamesElement) {
+            altNamesElement.off();
+            altNamesElement.remove();
+            altNamesElement = null;
+        }
+
+        // Clear jQuery references
+        if ($altTable) {
+            $altTable.off();
+            $altTable = null;
+        }
+
+        // Clear data arrays
+        nameArray = [];
+        selectedSegments = [];
+        segmentsWithAlternates = [];
+        primaryFeatures.clear();
+
+        // Remove map layers
+        if (SDK) {
+            try {
+                SDK.Map.removeAllFeaturesFromLayer({ layerName: PRIMARY_LAYER });
+                SDK.Map.removeAllFeaturesFromLayer({ layerName: HIGHLIGHT_LAYER });
+            } catch (e) {
+                console.debug('Error removing features during cleanup:', e);
+            }
+        }
+
+        isInitialized = false;
     }
 
     function AddLayerCheckbox(group, checkboxText, checked, callback) {
@@ -940,6 +988,12 @@
     }
 
     function bootstrap() {
+        // Prevent duplicate initialization
+        if (isInitialized) {
+            console.debug(`${scriptName}: Already initialized, skipping bootstrap`);
+            return;
+        }
+
         try {
             SDK = unsafeWindow.getWmeSdk({
                 scriptId: 'WMEShowAltNames',
@@ -948,8 +1002,14 @@
 
             if (SDK.State.isReady()) {
                 init();
+                isInitialized = true;
             } else {
-                SDK.Events.once({ eventName: 'wme-ready' }).then(init);
+                SDK.Events.once({ eventName: 'wme-ready' }).then(() => {
+                    if (!isInitialized) {
+                        init();
+                        isInitialized = true;
+                    }
+                });
             }
         } catch (err) {
             console.error(`${scriptName}: Failed to initialize SDK`, err);
