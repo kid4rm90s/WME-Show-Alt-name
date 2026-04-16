@@ -3,7 +3,7 @@
 // @description     Shows alt names for selected segments
 // @version         2026.04.16.01
 // @author          The_Cre8r / SAR85 / kid4rm89s
-// @copyright       SAR85, The_Cre8r / kid4rm89s
+// @copyright       SAR85 / The_Cre8r / kid4rm89s
 // @license         CC BY-NC-ND
 // @grant           unsafeWindow
 // @include         /^https:\/\/(www|beta)\.waze\.com\/(?!user\/)(.{2,6}\/)?editor\/?.*$/
@@ -968,3 +968,9 @@
     scriptupdatemonitor();
 
 })();
+
+/*Changelog*/
+/*
+2026.04.16.00 -
+    - Initial release after migration to SDK and rewrite.
+*/
