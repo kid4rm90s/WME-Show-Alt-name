@@ -15,7 +15,8 @@ Originally created by **SAR85** and **The_Cre8r**, currently maintained by **kid
 - **Click to select** — double-clicking a row selects the segment in WME.
 - **Randomized highlight colors** per unique street name for easy differentiation.
 - Option to **group segments by city** (toggle "Use City" checkbox) when coloring by name.
-- Draggable panel (with fallback for unsupported browsers).
+- Draggable panel via a handle icon at the top of the panel (position is remembered across page refreshes).
+- Resizable panel (with fallback for unsupported browsers).
 - Auto-updates via Greasy Fork.
 - Built on the **WME SDK** (async mode) for improved performance and reliability.
 
@@ -40,6 +41,7 @@ Originally created by **SAR85** and **The_Cre8r**, currently maintained by **kid
 6. **Double-click** a row to select the segment in WME.
 7. **Right-click** a colored name cell to randomize its highlight color.
 8. Use the **Options** button to toggle city-based grouping and other display settings.
+9. **Drag** the panel by the handle icon at its top to reposition it. The position is saved and restored automatically.
 
 ---
 

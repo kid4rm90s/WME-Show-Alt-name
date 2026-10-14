@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name            WME Show Alt Names
 // @description     Shows alt names for selected segments
-// @version         2026.10.14.01
+// @version         2026.10.14.03
 // @author          The_Cre8r / SAR85 / kid4rm89s
 // @copyright       SAR85 / The_Cre8r / kid4rm89s
 // @license         CC BY-NC-ND
@@ -23,7 +23,7 @@
 /* global unsafeWindow */
 
 (function () {
-    const updateMessage = `<strong>✨What's New :</strong><br> - Migrated the script to the WME SDK async mode for improved performance and reliability.<br> - Faster highlighting (uses redrawLayer instead of re-adding features).<br> - Uses the native WME layer switcher checkbox.<br><br> - Please report any bugs or issues you encounter.`;
+    const updateMessage = `<strong>✨What's New :</strong><br> - The panel is now draggable via the new handle at the top; its position is remembered.<br> - Migrated the script to the WME SDK async mode for improved performance and reliability.<br><br> - Please report any bugs or issues you encounter.`;
     const scriptName = GM_info.script.name;
     const scriptVersion = GM_info.script.version;
     const downloadUrl = 'https://update.greasyfork.org/scripts/574195/WME%20Show%20Alt%20Names.user.js';
@@ -40,6 +40,7 @@
         draggableSupported = true,
         nameArray = [],
         selectedSegments = [],
+        selectionRunId = 0, // Guards against overlapping async checkSelection() runs
         sdkEventSubscriptions = [], // Track SDK event subscriptions for cleanup
         isInitialized = false, // Prevent duplicate initialization
         CSS = {
@@ -560,17 +561,24 @@
      * @callback
      */
     async function checkSelection() {
+        // Claim a run token. Any older in-flight run that has awaited will bail out
+        // when it resumes, preventing overlapping runs from double-populating the table.
+        const runId = ++selectionRunId;
+
         if (!(await SDK.Map.isLayerVisible({ layerName: PRIMARY_LAYER }))) {
             return;
         }
+        if (runId !== selectionRunId) return;
 
         let nameColumnsCount = 0;
         selectedSegments = [];
 
         const sdkSel = await SDK.Editing.getSelection();
+        if (runId !== selectionRunId) return;
         if (!sdkSel || sdkSel.objectType !== 'segment') {
             altNamesElement.fadeOut();
             await SDK.Map.removeAllFeaturesFromLayer({ layerName: PRIMARY_LAYER });
+            if (runId !== selectionRunId) return;
             primaryFeatures.clear();
             segmentsWithAlternates = [];
             nameArray = []; // Clear nameArray to prevent memory leak
@@ -580,13 +588,17 @@
         const selectedIds = sdkSel.ids;
 
         await SDK.Map.removeAllFeaturesFromLayer({ layerName: PRIMARY_LAYER });
+        if (runId !== selectionRunId) return;
         primaryFeatures.clear();
+        segmentsWithAlternates = [];
 
         for (const segmentId of selectedIds) {
             const sdkSegment = await SDK.DataModel.Segments.getById({ segmentId });
+            if (runId !== selectionRunId) return;
             if (!sdkSegment) continue;
 
             let segmentWithAlternates = await SegmentWithAlternate.create(sdkSegment);
+            if (runId !== selectionRunId) return;
             segmentsWithAlternates.push(segmentWithAlternates);
             selectedSegments.push(segmentWithAlternates);
             primaryFeatures.set(segmentId, segmentWithAlternates.sdkFeature);
@@ -598,6 +610,7 @@
             }
         }
 
+        if (runId !== selectionRunId) return;
         populateTable(nameColumnsCount, $('#altSortByNode').prop('checked'));
         altNamesElement.fadeIn();
     }
@@ -700,6 +713,96 @@
     }
 
     /**
+     * Restores the panel's saved screen position (left/top, in px) from
+     * localStorage, clamped to the current viewport so an off-screen saved
+     * position can't hide the panel.
+     */
+    function applySavedPosition() {
+        let pos;
+        try {
+            pos = JSON.parse(window.localStorage.altNamesPosition ?? 'null');
+        } catch (e) {
+            pos = null;
+        }
+        if (!pos || typeof pos.left !== 'number' || typeof pos.top !== 'number') return;
+
+        const maxLeft = Math.max(0, window.innerWidth - 60);
+        const maxTop = Math.max(0, window.innerHeight - 40);
+        const left = Math.min(Math.max(0, pos.left), maxLeft);
+        const top = Math.min(Math.max(0, pos.top), maxTop);
+        // Switch from the default bottom-anchored position to an explicit top.
+        altNamesElement.css({ left: left + 'px', top: top + 'px', bottom: 'auto' });
+    }
+
+    /**
+     * Persists the panel's current left/top (px) to localStorage.
+     */
+    function savePosition() {
+        if (!altNamesElement) return;
+        const el = altNamesElement[0];
+        window.localStorage.altNamesPosition = JSON.stringify({
+            left: el.offsetLeft,
+            top: el.offsetTop,
+        });
+    }
+
+    /**
+     * Enables click-and-drag of the panel via the #altDragHandle icon.
+     * Tracks the gesture on `document` (not the panel) so the drag keeps
+     * following the cursor even when it leaves the panel bounds.
+     */
+    function makeDraggable() {
+        const handle = document.getElementById('altDragHandle');
+        if (!handle) return;
+
+        let offsetX = 0;
+        let offsetY = 0;
+        let dragging = false;
+
+        const onMove = (e) => {
+            if (!dragging) return;
+            const el = altNamesElement[0];
+            const parentRect = el.offsetParent ? el.offsetParent.getBoundingClientRect() : { left: 0, top: 0 };
+            const maxLeft = Math.max(0, (el.offsetParent ? el.offsetParent.clientWidth : window.innerWidth) - el.offsetWidth);
+            const maxTop = Math.max(0, (el.offsetParent ? el.offsetParent.clientHeight : window.innerHeight) - el.offsetHeight);
+            const left = Math.min(Math.max(0, e.clientX - parentRect.left - offsetX), maxLeft);
+            const top = Math.min(Math.max(0, e.clientY - parentRect.top - offsetY), maxTop);
+            altNamesElement.css({ left: left + 'px', top: top + 'px' });
+        };
+
+        const onUp = () => {
+            if (!dragging) return;
+            dragging = false;
+            altNamesElement.removeClass('alt-dragging');
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            savePosition();
+        };
+
+        const onDown = (e) => {
+            if (e.button !== 0) return; // left button only
+            e.preventDefault();
+            const el = altNamesElement[0];
+            const rect = el.getBoundingClientRect();
+            offsetX = e.clientX - rect.left;
+            offsetY = e.clientY - rect.top;
+            // Freeze the current position as left/top before the first move so the
+            // panel stops being bottom-anchored.
+            altNamesElement.css({
+                left: rect.left - (el.offsetParent ? el.offsetParent.getBoundingClientRect().left : 0) + 'px',
+                top: rect.top - (el.offsetParent ? el.offsetParent.getBoundingClientRect().top : 0) + 'px',
+                bottom: 'auto',
+            });
+            dragging = true;
+            altNamesElement.addClass('alt-dragging');
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        };
+
+        handle.addEventListener('mousedown', onDown);
+    }
+
+    /**
      * Initializes the script by adding CSS and HTML to page, registering event
      * listeners, adding map layers and running main
      * functions to check for segments loaded at init and highlighting.
@@ -719,6 +822,12 @@
         css += 'overflow-y: scroll; overflow-x: hidden; white-space: nowrap; background-color: rgba(0,0,0,0.8); color: white; padding: 5px; ';
         css += 'z-index: 1001; border-radius: 5px; max-height: 60%;}\n';
 
+        // drag handle CSS (inline icon sitting at the left of the options row)
+        css += '#altDragHandle {display: inline-block; vertical-align: middle; width: 18px; height: 18px; margin: 0 4px 4px 0; padding: 1px; border: 1px solid white; border-radius: 3px; cursor: move; opacity: 0.7; box-sizing: border-box;}\n';
+        css += '#altDragHandle:hover {opacity: 1;}\n';
+        css += '#altDragHandle svg {display: block; width: 100%; height: 100%; fill: white; pointer-events: none;}\n';
+        css += '#altDiv.alt-dragging {user-select: none;}\n';
+
         // scroll bar CSS
         css += '#altDiv::-webkit-scrollbar {width: 15px; border-radius: 5px;}\n';
         css += '#altDiv::-webkit-scrollbar-track {border-radius: 5px; background: none; width: 10px;}\n';
@@ -736,9 +845,9 @@
         //add css to page
         $('<style/>').html(css).appendTo($(document.head));
 
-        // Make the options menu.
+        // Make the options menu. The drag handle sits inline at the left of the row.
         optionsHTML =
-            '<div id="altOptions"> <label style="float: right; margin: 3px;"> <input id="altHighlights" type="checkbox">Highlight Alt Names</label> <button id="altOptionsButton" class="altOptions-button" style="float: right;">Show Options</button> </div> <div id="optionsDiv"> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altShowCity">Show city name in table</label> </div> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altUseCity">Use city name in name matching</label> </div> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altSortByNode">Sort table by driving order (experimental)</label> </div> </div>';
+            '<div id="altOptions"> <div id="altDragHandle" title="Drag to move"><svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M4 5h16v2H4V5zm0 6h16v2H4v-2zm0 6h16v2H4v-2z"/></svg></div><button id="altOptionsButton" class="altOptions-button">Show Options</button> <label style="float: right; margin: 3px;"> <input id="altHighlights" type="checkbox">Highlight Alt Names</label> </div> <div id="optionsDiv"> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altShowCity">Show city name in table</label> </div> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altUseCity">Use city name in name matching</label> </div> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altSortByNode">Sort table by driving order (experimental)</label> </div> </div>';
 
         // Make the table to hold segment information.
         $altTable = $('<table/>').attr('id', 'altTable').addClass('altTable');
@@ -755,6 +864,8 @@
         altNamesElement.append(optionsHTML);
         altNamesElement.append($altTable);
         altNamesElement.appendTo($('#WazeMap'));
+        applySavedPosition();
+        makeDraggable();
         $('#altOptionsButton').click(function () {
             let $optionsDiv = $('#optionsDiv');
             if ($optionsDiv.css('display') === 'none') {
@@ -790,17 +901,12 @@
             void selectSegment($(this).text());
         });
 
-        // Make $altDiv resizable and draggable
+        // Make $altDiv resizable (dragging is handled by the drag handle).
         try {
             altNamesElement.one('resize', function () {
                 $(this).css('max-height', '100%');
             });
             altNamesElement.resizable({ handles: 'all', containment: 'parent' });
-            altNamesElement.one('drag', function () {
-                $(this).css('bottom', 'auto');
-            });
-
-            altNamesElement.draggable({ containment: 'parent' });
         } catch (err) {
             draggableSupported = false;
         }
@@ -974,6 +1080,13 @@
 
 /*Changelog*/
 /*
+2026.10.14.03 -
+    - Moved the drag handle inline to the left of the "Show Options" button.
+    - Fixed duplicated rows when a single segment was selected (overlapping async
+      selection refreshes are now guarded).
+2026.10.14.02 -
+    - Added a drag handle (window icon) to the panel; drag it with the mouse to
+      reposition. The position is remembered across page refreshes.
 2026.10.14.01 -
     - Migrated to the WME SDK async mode (sync is on the deprecation path).
     - Faster highlighting: uses redrawLayer() with mutable style state instead of
