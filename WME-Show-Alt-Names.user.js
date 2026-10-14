@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name            WME Show Alt Names
 // @description     Shows alt names for selected segments
-// @version         2026.10.14.03
+// @version         2026.10.14.09
 // @author          The_Cre8r / SAR85 / kid4rm89s
 // @copyright       SAR85 / The_Cre8r / kid4rm89s
 // @license         CC BY-NC-ND
@@ -32,6 +32,10 @@
     const PRIMARY_LAYER = 'WME Show Alt Names';
     const HIGHLIGHT_LAYER = 'WME Show Alt Names Highlight';
     const LAYER_CHECKBOX_NAME = 'Show Alt Names';
+    // WME overlays a ~20px footer across the bottom of the map viewport; reserve
+    // extra room so the panel never clamps underneath it.
+    const VIEWPORT_BOTTOM_INSET = 20;
+    const VIEWPORT_MARGIN = 6;
     let SDK,
         altNamesElement,
         $altTable,
@@ -41,6 +45,8 @@
         nameArray = [],
         selectedSegments = [],
         selectionRunId = 0, // Guards against overlapping async checkSelection() runs
+        panelClosed = false, // Set true when the user manually closes the panel
+        closedSelectionKey = null, // Selection signature at the moment of closing
         sdkEventSubscriptions = [], // Track SDK event subscriptions for cleanup
         isInitialized = false, // Prevent duplicate initialization
         CSS = {
@@ -85,8 +91,8 @@
                 bottom: '60px',
                 'min-height': '120px',
                 'min-width': '335px',
-                'overflow-y': 'scroll',
-                'overflow-x': 'hidden',
+                'overflow-y': 'auto',
+                'overflow-x': 'auto',
                 'white-space': 'nowrap',
                 'background-color': 'rgba(0,0,0,0.8)',
                 color: 'white',
@@ -570,11 +576,30 @@
         }
         if (runId !== selectionRunId) return;
 
+        const sdkSel = await SDK.Editing.getSelection();
+        if (runId !== selectionRunId) return;
+
+        // A manual close suppresses the panel only while the selection stays the
+        // same. Any new/changed segment selection re-opens it automatically.
+        const selectionKey = sdkSel && sdkSel.objectType === 'segment'
+            ? sdkSel.ids.slice().sort().join(',')
+            : null;
+        if (panelClosed) {
+            if (selectionKey === null || selectionKey === closedSelectionKey) {
+                await SDK.Map.removeAllFeaturesFromLayer({ layerName: PRIMARY_LAYER });
+                primaryFeatures.clear();
+                segmentsWithAlternates = [];
+                selectedSegments = [];
+                return;
+            }
+            // Selection changed since closing — reopen.
+            panelClosed = false;
+            closedSelectionKey = null;
+        }
+
         let nameColumnsCount = 0;
         selectedSegments = [];
 
-        const sdkSel = await SDK.Editing.getSelection();
-        if (runId !== selectionRunId) return;
         if (!sdkSel || sdkSel.objectType !== 'segment') {
             altNamesElement.fadeOut();
             await SDK.Map.removeAllFeaturesFromLayer({ layerName: PRIMARY_LAYER });
@@ -613,6 +638,9 @@
         if (runId !== selectionRunId) return;
         populateTable(nameColumnsCount, $('#altSortByNode').prop('checked'));
         altNamesElement.fadeIn();
+        // Re-align after the table grows so extra rows/columns can't push the
+        // panel out of the viewport when many segments are selected.
+        clampPanelToViewport();
     }
 
     /**
@@ -727,7 +755,7 @@
         if (!pos || typeof pos.left !== 'number' || typeof pos.top !== 'number') return;
 
         const maxLeft = Math.max(0, window.innerWidth - 60);
-        const maxTop = Math.max(0, window.innerHeight - 40);
+        const maxTop = Math.max(0, window.innerHeight - VIEWPORT_BOTTOM_INSET - 40);
         const left = Math.min(Math.max(0, pos.left), maxLeft);
         const top = Math.min(Math.max(0, pos.top), maxTop);
         // Switch from the default bottom-anchored position to an explicit top.
@@ -747,6 +775,40 @@
     }
 
     /**
+     * Re-aligns the panel so its CURRENT (possibly grown) size stays fully
+     * inside its offsetParent. Called after the table is populated so that
+     * selecting more segments can't push the panel out of the viewport.
+     * Only acts when the panel uses an explicit top (i.e. it was dragged);
+     * the default bottom-anchored position is left untouched.
+     */
+    function clampPanelToViewport() {
+        if (!altNamesElement || !altNamesElement.is(':visible')) return;
+        const el = altNamesElement[0];
+        // Skip the default bottom-anchored layout (no explicit top set).
+        if (el.style.top === '' || el.style.top === 'auto') return;
+
+        const parent = el.offsetParent;
+        const parentRect = parent ? parent.getBoundingClientRect() : { left: 0, top: 0 };
+        const parentW = parent ? parent.clientWidth : window.innerWidth;
+        const parentH = parent ? parent.clientHeight : window.innerHeight;
+
+        // Recover the panel's current position relative to its offsetParent.
+        const curLeft = el.getBoundingClientRect().left - parentRect.left;
+        const curTop = el.getBoundingClientRect().top - parentRect.top;
+
+        // Reserve room for WME's bottom footer so the panel isn't hidden by it.
+        const maxLeft = Math.max(0, parentW - el.offsetWidth - VIEWPORT_MARGIN);
+        const maxTop = Math.max(0, parentH - el.offsetHeight - VIEWPORT_BOTTOM_INSET - VIEWPORT_MARGIN);
+        const left = Math.min(Math.max(0, curLeft), maxLeft);
+        const top = Math.min(Math.max(0, curTop), maxTop);
+
+        if (left !== curLeft || top !== curTop) {
+            altNamesElement.css({ left: left + 'px', top: top + 'px', bottom: 'auto' });
+            savePosition();
+        }
+    }
+
+    /**
      * Enables click-and-drag of the panel via the #altDragHandle icon.
      * Tracks the gesture on `document` (not the panel) so the drag keeps
      * following the cursor even when it leaves the panel bounds.
@@ -763,8 +825,8 @@
             if (!dragging) return;
             const el = altNamesElement[0];
             const parentRect = el.offsetParent ? el.offsetParent.getBoundingClientRect() : { left: 0, top: 0 };
-            const maxLeft = Math.max(0, (el.offsetParent ? el.offsetParent.clientWidth : window.innerWidth) - el.offsetWidth);
-            const maxTop = Math.max(0, (el.offsetParent ? el.offsetParent.clientHeight : window.innerHeight) - el.offsetHeight);
+            const maxLeft = Math.max(0, (el.offsetParent ? el.offsetParent.clientWidth : window.innerWidth) - el.offsetWidth - VIEWPORT_MARGIN);
+            const maxTop = Math.max(0, (el.offsetParent ? el.offsetParent.clientHeight : window.innerHeight) - el.offsetHeight - VIEWPORT_BOTTOM_INSET - VIEWPORT_MARGIN);
             const left = Math.min(Math.max(0, e.clientX - parentRect.left - offsetX), maxLeft);
             const top = Math.min(Math.max(0, e.clientY - parentRect.top - offsetY), maxTop);
             altNamesElement.css({ left: left + 'px', top: top + 'px' });
@@ -819,7 +881,7 @@
         css += 'tr.altTable-selected > .altTable-id {font-weight: bold; background-color: white; color: black;}\n';
 
         css += '#altDiv {display: none; position: absolute; left: 6px; bottom: 60px; min-height: 120px; min-width: 335px;';
-        css += 'overflow-y: scroll; overflow-x: hidden; white-space: nowrap; background-color: rgba(0,0,0,0.8); color: white; padding: 5px; ';
+        css += 'overflow-y: auto; overflow-x: hidden; white-space: nowrap; background-color: rgba(0,0,0,0.8); color: white; padding: 5px; ';
         css += 'z-index: 1001; border-radius: 5px; max-height: 60%;}\n';
 
         // drag handle CSS (inline icon sitting at the left of the options row)
@@ -836,6 +898,8 @@
 
         // buttons css
         css += '.altOptions-button {margin: 0 0 3px 3px; height: 2em; font-size: 0.8em;}\n';
+        css += '#altCloseButton {position: absolute; top: 3px; right: 3px; width: 18px; height: 18px; margin: 0; padding: 0; line-height: 16px; text-align: center; font-size: 14px; font-weight: bold; color: white; background: transparent; border: 1px solid white; border-radius: 3px; cursor: pointer; opacity: 0.7; box-sizing: border-box; z-index: 2;}\n';
+        css += '#altCloseButton:hover {opacity: 1; background-color: rgba(255,255,255,0.2);}\n';
 
         // Options Menu CSS
         css += '#optionsDiv {display: none; clear: both; border: 1px solid white; padding: 3px; margin: 0 0 3px 0; font-weight: normal;}';
@@ -847,7 +911,7 @@
 
         // Make the options menu. The drag handle sits inline at the left of the row.
         optionsHTML =
-            '<div id="altOptions"> <div id="altDragHandle" title="Drag to move"><svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M4 5h16v2H4V5zm0 6h16v2H4v-2zm0 6h16v2H4v-2z"/></svg></div><button id="altOptionsButton" class="altOptions-button">Show Options</button> <label style="float: right; margin: 3px;"> <input id="altHighlights" type="checkbox">Highlight Alt Names</label> </div> <div id="optionsDiv"> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altShowCity">Show city name in table</label> </div> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altUseCity">Use city name in name matching</label> </div> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altSortByNode">Sort table by driving order (experimental)</label> </div> </div>';
+            '<div id="altOptions"> <div id="altDragHandle" title="Drag to move"><svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M4 5h16v2H4V5zm0 6h16v2H4v-2zm0 6h16v2H4v-2z"/></svg></div><button id="altOptionsButton" class="altOptions-button">Show Options</button> <label style="float: right; margin: 3px; margin-right: 26px;"> <input id="altHighlights" type="checkbox">Highlight Alt Names</label> </div> <div id="optionsDiv"> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altShowCity">Show city name in table</label> </div> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altUseCity">Use city name in name matching</label> </div> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altSortByNode">Sort table by driving order (experimental)</label> </div> </div>';
 
         // Make the table to hold segment information.
         $altTable = $('<table/>').attr('id', 'altTable').addClass('altTable');
@@ -861,6 +925,7 @@
 
         // Make the main div to hold script content.
         altNamesElement = $('<div/>').attr('id', 'altDiv');
+        altNamesElement.append('<button id="altCloseButton" title="Close panel">&times;</button>');
         altNamesElement.append(optionsHTML);
         altNamesElement.append($altTable);
         altNamesElement.appendTo($('#WazeMap'));
@@ -875,6 +940,18 @@
                 $optionsDiv.hide();
                 $(this).text('Show Options');
             }
+        });
+        $('#altCloseButton').click(async function () {
+            panelClosed = true;
+            // Record what was selected when the user closed, so a *new* selection
+            // is detected and re-opens the panel automatically.
+            const sel = await SDK.Editing.getSelection();
+            closedSelectionKey = sel && sel.objectType === 'segment'
+                ? sel.ids.slice().sort().join(',')
+                : null;
+            altNamesElement.fadeOut();
+            void SDK.Map.removeAllFeaturesFromLayer({ layerName: PRIMARY_LAYER });
+            primaryFeatures.clear();
         });
         $('#altSortByNode').on('change', () => void checkSelection());
         $('#altHighlights').on('change', () => void checkAllSegments());
@@ -966,6 +1043,11 @@
         await SDK.Map.setLayerVisibility({ layerName: HIGHLIGHT_LAYER, visibility: checked });
         if (SDK.LayerSwitcher.isLayerCheckboxChecked({ name: LAYER_CHECKBOX_NAME }) !== checked) {
             SDK.LayerSwitcher.setLayerCheckboxChecked({ name: LAYER_CHECKBOX_NAME, isChecked: checked });
+        }
+        // Re-enabling the layer clears a previous manual close and re-shows the panel.
+        if (checked) {
+            panelClosed = false;
+            void checkSelection();
         }
         await saveOptions();
     }
@@ -1080,6 +1162,20 @@
 
 /*Changelog*/
 /*
+2026.10.14.08 -
+    - Moved the close (×) button to the top-right corner of the panel.
+2026.10.14.07 -
+    - After closing the panel, selecting a different segment now re-opens it
+      automatically (no need to toggle the layer checkbox).
+2026.10.14.06 -
+    - Reserve room for WME's ~20px bottom footer so the panel is no longer
+      covered by it when aligned to the bottom edge.
+2026.10.14.05 -
+    - Added a close (×) button to the panel so it can be closed manually.
+      The panel stays closed until the layer checkbox is toggled back on.
+2026.10.14.04 -
+    - The panel now re-aligns itself inside the viewport after the table grows
+      (e.g. when selecting multiple segments), instead of overflowing the edge.
 2026.10.14.03 -
     - Moved the drag handle inline to the left of the "Show Options" button.
     - Fixed duplicated rows when a single segment was selected (overlapping async

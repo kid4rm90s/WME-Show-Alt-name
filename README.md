@@ -42,6 +42,7 @@ Originally created by **SAR85** and **The_Cre8r**, currently maintained by **kid
 7. **Right-click** a colored name cell to randomize its highlight color.
 8. Use the **Options** button to toggle city-based grouping and other display settings.
 9. **Drag** the panel by the handle icon at its top to reposition it. The position is saved and restored automatically.
+10. **Close** the panel with the **×** button beside the options; toggle the layer checkbox back on to bring it back.
 
 ---
 
