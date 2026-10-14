@@ -17,7 +17,7 @@ Originally created by **SAR85** and **The_Cre8r**, currently maintained by **kid
 - Option to **group segments by city** (toggle "Use City" checkbox) when coloring by name.
 - Draggable panel (with fallback for unsupported browsers).
 - Auto-updates via Greasy Fork.
-- Built on the **WME SDK** for improved performance and reliability.
+- Built on the **WME SDK** (async mode) for improved performance and reliability.
 
 ---
 

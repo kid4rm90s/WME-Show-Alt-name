@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name            WME Show Alt Names
 // @description     Shows alt names for selected segments
-// @version         2026.04.16.02
+// @version         2026.10.14.01
 // @author          The_Cre8r / SAR85 / kid4rm89s
 // @copyright       SAR85 / The_Cre8r / kid4rm89s
 // @license         CC BY-NC-ND
@@ -10,7 +10,7 @@
 // @namespace       https://greasyfork.org/users/1087400
 // @connect         greasyfork.org
 // @grant           GM_xmlhttpRequest
-// @require         https://greasyfork.org/scripts/560385/code/WazeToastr.js
+// @require         https://update.greasyfork.org/scripts/24851/WazeWrap.js
 // @downloadURL     https://update.greasyfork.org/scripts/574195/WME%20Show%20Alt%20Names.user.js
 // @updateURL       https://update.greasyfork.org/scripts/574195/WME%20Show%20Alt%20Names.meta.js
 // ==/UserScript==
@@ -23,7 +23,7 @@
 /* global unsafeWindow */
 
 (function () {
-    const updateMessage = `<strong>✨What's New :</strong><br> - Migrated the script to the WME SDK for improved performance and reliability.<br><br> - Please report any bugs or issues you encounter.`;
+    const updateMessage = `<strong>✨What's New :</strong><br> - Migrated the script to the WME SDK async mode for improved performance and reliability.<br> - Faster highlighting (uses redrawLayer instead of re-adding features).<br> - Uses the native WME layer switcher checkbox.<br><br> - Please report any bugs or issues you encounter.`;
     const scriptName = GM_info.script.name;
     const scriptVersion = GM_info.script.version;
     const downloadUrl = 'https://update.greasyfork.org/scripts/574195/WME%20Show%20Alt%20Names.user.js';
@@ -31,6 +31,7 @@
 
     const PRIMARY_LAYER = 'WME Show Alt Names';
     const HIGHLIGHT_LAYER = 'WME Show Alt Names Highlight';
+    const LAYER_CHECKBOX_NAME = 'Show Alt Names';
     let SDK,
         altNamesElement,
         $altTable,
@@ -163,44 +164,44 @@
 
     /**
      * Resets the highlight state of all features on the primary layer.
-     * Re-adds any highlighted features without highlight to trigger style update.
+     * Mutates the shared style state and asks the SDK to re-render (no re-add).
      */
-    function resetHighlight() {
+    async function resetHighlight() {
+        let changed = false;
         for (const [segId, feat] of primaryFeatures) {
             if (feat.properties.isHighlighted) {
-                SDK.Map.removeFeatureFromLayer({ layerName: PRIMARY_LAYER, featureId: segId });
-                const reset = { ...feat, properties: { ...feat.properties, isHighlighted: false } };
-                primaryFeatures.set(segId, reset);
-                SDK.Map.addFeatureToLayer({ layerName: PRIMARY_LAYER, feature: reset });
+                feat.properties.isHighlighted = false;
+                changed = true;
             }
         }
+        if (changed) await SDK.Map.redrawLayer({ layerName: PRIMARY_LAYER });
     }
 
     /**
      * Highlights a single feature on the primary layer with the given color.
-     * Re-adds the feature with updated properties to trigger style update.
+     * Mutates the feature's properties and re-renders via the SDK
+     * (no feature removal/re-adding, which is 10-100x faster).
      */
-    function highlightFeature(segmentId, color) {
+    async function highlightFeature(segmentId, color) {
         const feat = primaryFeatures.get(segmentId);
         if (!feat) return;
-        SDK.Map.removeFeatureFromLayer({ layerName: PRIMARY_LAYER, featureId: segmentId });
-        const updated = { ...feat, properties: { ...feat.properties, bgColor: color, isHighlighted: true } };
-        primaryFeatures.set(segmentId, updated);
-        SDK.Map.addFeatureToLayer({ layerName: PRIMARY_LAYER, feature: updated });
+        feat.properties.bgColor = color;
+        feat.properties.isHighlighted = true;
+        await SDK.Map.redrawLayer({ layerName: PRIMARY_LAYER });
     }
 
     /**
      * Pans the map to a segment specified by its ID.
      * @param {Number} id The ID of the segment.
      */
-    function panToSegment(id) {
+    async function panToSegment(id) {
         if (!id) return;
-        const segment = SDK.DataModel.Segments.getById({ segmentId: id });
+        const segment = await SDK.DataModel.Segments.getById({ segmentId: id });
         if (!segment) return;
         const coords = segment.geometry.coordinates;
         const lons = coords.map(c => c[0]);
         const lats = coords.map(c => c[1]);
-        SDK.Map.setMapCenter({
+        await SDK.Map.setMapCenter({
             lonLat: {
                 lon: (Math.min(...lons) + Math.max(...lons)) / 2,
                 lat: (Math.min(...lats) + Math.max(...lats)) / 2,
@@ -212,9 +213,9 @@
      * Selects a segment specified by its ID.
      * @param {Number} id The ID of the segment.
      */
-    function selectSegment(id) {
+    async function selectSegment(id) {
         if (!id) return;
-        SDK.Editing.setSelection({
+        await SDK.Editing.setSelection({
             selection: { ids: [id], objectType: 'segment' },
         });
     }
@@ -241,19 +242,27 @@
     }
 
     /**
-     * Lookup function for the display color of a specified road type. Will
-     * return the color for the experimental layer if it is activated,
-     * otherwise it will return the color for the old roads layer.
+     * Lookup function for the display color of a specified road type.
+     * Falls back to the hardcoded ROAD_TYPES table (abbreviation + colour),
+     * optionally overriding the label with the SDK's localized name.
      * @param {Number} type The roadType to look up.
      * @returns {Object} Object of form:
      * {typeString: 'RoadTypeName', typeColor: '#FFFFFF'},
      * where RoadTypeName is an abbreviated form of the name of the road type
      * and typeColor is the hex value of the display color.
      */
+    const roadTypeNames = new Map();
     function getRoadColor(type) {
         if (type && ROAD_TYPES[type] !== undefined) {
+            if (!roadTypeNames.size) {
+                try {
+                    (SDK.DataModel.Segments.getRoadTypes() ?? []).forEach(rt => roadTypeNames.set(rt.id, rt.localizedName || rt.name));
+                } catch (e) {
+                    // Non-fatal: fall back to hardcoded abbreviations.
+                }
+            }
             return {
-                typeString: ROAD_TYPES[type].name,
+                typeString: roadTypeNames.get(type) ?? ROAD_TYPES[type].name,
                 typeColor: ROAD_TYPES[type].expColor,
             };
         } else {
@@ -262,67 +271,84 @@
     }
 
     /**
+     * Resolves a street/city pair to display strings, normalising empties.
+     */
+    function describeAddress(address) {
+        const street = address?.street;
+        const city = address?.city;
+        return {
+            name: street ? street.name || 'No name' : 'New road',
+            city: city ? city.name || 'No city' : 'New road',
+        };
+    }
+
+    /**
      * Data structure for segment information used to build highlight layer
      * features and the alternate names table.
-     * @class
-     * @param {Waze.Feature.Vector.Segment} The segment feature on which to
-     * base the new instance.
+     *
+     * Async factory because resolving the address is a Promise in async SDK mode.
+     * Use `await SegmentWithAlternate.create(segment)`.
      */
-    function SegmentWithAlternate(sdkSegment) {
-        if (!sdkSegment) return;
+    class SegmentWithAlternate {
+        constructor(sdkSegment) {
+            this.segmentID = sdkSegment.id;
 
-        this.segmentID = sdkSegment.id;
-
-        // Backward-compatible attributes object (used by sortSegmentsByNode).
-        this.attributes = {
-            id: sdkSegment.id,
-            primaryStreetID: sdkSegment.primaryStreetId,
-            streetIDs: sdkSegment.alternateStreetIds,
-            roadType: sdkSegment.roadType,
-            length: sdkSegment.length,
-            fromNodeID: sdkSegment.fromNodeId,
-            toNodeID: sdkSegment.toNodeId,
-        };
-
-        // Store segment name information.
-        let streetObject = SDK.DataModel.Streets.getById({ streetId: sdkSegment.primaryStreetId });
-        let cityObject = streetObject && SDK.DataModel.Cities.getById({ cityId: streetObject.cityId });
-        this.primaryName = streetObject ? streetObject.name || 'No name' : 'New road';
-        this.primaryCity = cityObject ? cityObject.name || 'No city' : 'New road';
-
-        this.alternates = [];
-        for (let i = 0; i < sdkSegment.alternateStreetIds.length; i++) {
-            streetObject = SDK.DataModel.Streets.getById({ streetId: sdkSegment.alternateStreetIds[i] });
-            cityObject = streetObject && SDK.DataModel.Cities.getById({ cityId: streetObject.cityId });
-            this.alternates.push({
-                name: streetObject ? streetObject.name || 'No name' : 'New road',
-                city: cityObject ? cityObject.name || 'No city' : 'New road',
-            });
-        }
-
-        const roadColor = getRoadColor(sdkSegment.roadType);
-
-        // GeoJSON feature for SDK layer — replaces OL Feature.Vector.
-        this.sdkFeature = {
-            id: sdkSegment.id,
-            type: 'Feature',
-            geometry: sdkSegment.geometry,
-            properties: {
+            // Backward-compatible attributes object (used by sortSegmentsByNode).
+            this.attributes = {
                 id: sdkSegment.id,
+                primaryStreetID: sdkSegment.primaryStreetId,
+                streetIDs: sdkSegment.alternateStreetIds,
                 roadType: sdkSegment.roadType,
                 length: sdkSegment.length,
-                bgColor: roadColor.typeColor,
-                isHighlighted: false,
-                alt: this.alternates,
-                primary: { name: this.primaryName, city: this.primaryCity },
-            },
-        };
+                fromNodeID: sdkSegment.fromNodeId,
+                toNodeID: sdkSegment.toNodeId,
+            };
 
-        // Make a table row for displaying segment data.
-        this.tableRow = this.createTableRow();
-    }
-    SegmentWithAlternate.prototype = /** @lends Alternate.prototype */ {
-        createTableRow: function () {
+            this.primaryName = 'New road';
+            this.primaryCity = 'New road';
+            this.alternates = [];
+            this.sdkFeature = null;
+            this.tableRow = null;
+        }
+
+        static async create(sdkSegment) {
+            const instance = new SegmentWithAlternate(sdkSegment);
+            await instance.resolveAddress(sdkSegment);
+            instance.buildFeature(sdkSegment);
+            instance.tableRow = instance.createTableRow();
+            return instance;
+        }
+
+        async resolveAddress(sdkSegment) {
+            // Single call resolves primary + alternate street/city (replaces N lookups).
+            const address = await SDK.DataModel.Segments.getAddress({ segmentId: sdkSegment.id });
+            const primary = describeAddress(address);
+            this.primaryName = primary.name;
+            this.primaryCity = primary.city;
+            this.alternates = (address?.altStreets ?? []).map(describeAddress);
+        }
+
+        buildFeature(sdkSegment) {
+            const roadColor = getRoadColor(sdkSegment.roadType);
+
+            // GeoJSON feature for SDK layer — replaces OL Feature.Vector.
+            this.sdkFeature = {
+                id: sdkSegment.id,
+                type: 'Feature',
+                geometry: sdkSegment.geometry,
+                properties: {
+                    id: sdkSegment.id,
+                    roadType: sdkSegment.roadType,
+                    length: sdkSegment.length,
+                    bgColor: roadColor.typeColor,
+                    isHighlighted: false,
+                    alt: this.alternates,
+                    primary: { name: this.primaryName, city: this.primaryCity },
+                },
+            };
+        }
+
+        createTableRow() {
             let $row, $cell, roadType;
 
             $row = $('<tr/>').attr('id', 'alt' + this.segmentID);
@@ -354,8 +380,8 @@
                 $row.append($cell);
             }
             return $row;
-        },
-    };
+        }
+    }
 
     /**
      * Colors the table cells based on segment/city name.
@@ -439,7 +465,7 @@
      * @param {jQuery} $el The cell from the table to match.
      * @param {String} color The rgba-formatted color value.
      */
-    function colorFeatures($el, color) {
+    async function colorFeatures($el, color) {
         'use strict';
         let i,
             n,
@@ -475,11 +501,10 @@
      * @param {String} color The rgba-formatted color (optional--default is
      * black).
      */
-    function colorSegment(id, color) {
+    async function colorSegment(id, color) {
         'use strict';
-        let i, n, feature;
         color = color || 'rgba(0, 0, 0, 0.8)';
-        highlightFeature(id, color);
+        await highlightFeature(id, color);
     }
 
     /**
@@ -497,10 +522,10 @@
             case 'mouseenter':
                 $this1 = $(this);
                 if (event.data.singleSegment) {
-                    colorSegment($this1.text());
+                    void colorSegment($this1.text());
                     $this1.parent().addClass('altTable-selected');
                 } else {
-                    colorFeatures($this1, $this1.css('background-color'));
+                    void colorFeatures($this1, $this1.css('background-color'));
                     if ($this1.hasClass('altTable-primary')) {
                         name1 = $this1.find('.altTable-primary-name').text();
                         city1 = $this1.find('.altTable-primary-city').text();
@@ -520,7 +545,7 @@
 
                 break;
             case 'mouseleave':
-                resetHighlight();
+                void resetHighlight();
                 $('#altTable tr').each(function (index) {
                     $(this).removeClass('altTable-selected');
                 });
@@ -534,19 +559,18 @@
      * displays/hides UI elements.
      * @callback
      */
-    function checkSelection() {
-        if (!SDK.Map.isLayerVisible({ layerName: PRIMARY_LAYER })) {
+    async function checkSelection() {
+        if (!(await SDK.Map.isLayerVisible({ layerName: PRIMARY_LAYER }))) {
             return;
         }
 
         let nameColumnsCount = 0;
         selectedSegments = [];
-        //$('#altAutoSelect').hide(); // Auto-select route feature removed (WazeWrap routing unavailable)
 
-        const sdkSel = SDK.Editing.getSelection();
+        const sdkSel = await SDK.Editing.getSelection();
         if (!sdkSel || sdkSel.objectType !== 'segment') {
             altNamesElement.fadeOut();
-            SDK.Map.removeAllFeaturesFromLayer({ layerName: PRIMARY_LAYER });
+            await SDK.Map.removeAllFeaturesFromLayer({ layerName: PRIMARY_LAYER });
             primaryFeatures.clear();
             segmentsWithAlternates = [];
             nameArray = []; // Clear nameArray to prevent memory leak
@@ -554,20 +578,19 @@
         }
 
         const selectedIds = sdkSel.ids;
-        // Auto-select button hidden — routing feature unavailable without WazeWrap
 
-        SDK.Map.removeAllFeaturesFromLayer({ layerName: PRIMARY_LAYER });
+        await SDK.Map.removeAllFeaturesFromLayer({ layerName: PRIMARY_LAYER });
         primaryFeatures.clear();
 
         for (const segmentId of selectedIds) {
-            const sdkSegment = SDK.DataModel.Segments.getById({ segmentId });
+            const sdkSegment = await SDK.DataModel.Segments.getById({ segmentId });
             if (!sdkSegment) continue;
 
-            let segmentWithAlternates = new SegmentWithAlternate(sdkSegment);
+            let segmentWithAlternates = await SegmentWithAlternate.create(sdkSegment);
             segmentsWithAlternates.push(segmentWithAlternates);
             selectedSegments.push(segmentWithAlternates);
             primaryFeatures.set(segmentId, segmentWithAlternates.sdkFeature);
-            SDK.Map.addFeatureToLayer({ layerName: PRIMARY_LAYER, feature: segmentWithAlternates.sdkFeature });
+            await SDK.Map.addFeatureToLayer({ layerName: PRIMARY_LAYER, feature: segmentWithAlternates.sdkFeature });
 
             if (segmentWithAlternates.alternates.length >= nameColumnsCount) {
                 nameColumnsCount = segmentWithAlternates.alternates.length;
@@ -583,13 +606,14 @@
      * Checks all segments in WME for alt names and adds feature for
      * highlighting.
      */
-    function checkAllSegments() {
-        SDK.Map.removeAllFeaturesFromLayer({ layerName: HIGHLIGHT_LAYER });
-        if (!SDK.Map.isLayerVisible({ layerName: PRIMARY_LAYER }) || !$('#altHighlights').prop('checked')) {
+    async function checkAllSegments() {
+        await SDK.Map.removeAllFeaturesFromLayer({ layerName: HIGHLIGHT_LAYER });
+        if (!(await SDK.Map.isLayerVisible({ layerName: PRIMARY_LAYER })) || !$('#altHighlights').prop('checked')) {
             return;
         }
 
-        const highlightFeatures = SDK.DataModel.Segments.getAll()
+        const allSegments = await SDK.DataModel.Segments.getAll();
+        const highlightFeatures = (allSegments ?? [])
             .filter(seg => seg.alternateStreetIds?.length > 0)
             .map(seg => ({
                 id: seg.id,
@@ -598,7 +622,7 @@
                 properties: {},
             }));
         if (highlightFeatures.length > 0) {
-            SDK.Map.addFeaturesToLayer({ layerName: HIGHLIGHT_LAYER, features: highlightFeatures });
+            await SDK.Map.addFeaturesToLayer({ layerName: HIGHLIGHT_LAYER, features: highlightFeatures });
         }
     }
 
@@ -655,44 +679,24 @@
         }
     }
 
-    /**
-     * Auto-select route segments between selected endpoints.
-     * NOTE: WazeWrap.Model.RouteSelection removed — no SDK equivalent available.
-     */
-    function performAutoSelect() {
-        console.warn(`${scriptName}: Auto-select route feature is unavailable (WazeWrap routing removed).`);
-    }
-
-    function saveOptions() {
+    async function saveOptions() {
         let options = {
-            fastest: $('#altFastest').prop('checked'),
-            tolls: $('#altAvoidTolls').prop('checked'),
-            freeways: $('#altAvoidFreeways').prop('checked'),
-            dirt: $('#altAvoidDirt').prop('checked'),
-            longtrails: $('#altAvoidLongDirt').prop('checked'),
-            uturns: $('#altAllowUturns').prop('checked'),
             highlights: $('#altHighlights').prop('checked'),
             sortByNode: $('#altSortByNode').prop('checked'),
             useCity: $('#altUseCity').prop('checked'),
             showCity: $('#altShowCity').prop('checked'),
-            layerToggle: SDK.Map.isLayerVisible({ layerName: PRIMARY_LAYER }),
+            layerToggle: await SDK.Map.isLayerVisible({ layerName: PRIMARY_LAYER }),
         };
         return (window.localStorage.altNamesOptions = JSON.stringify(options));
     }
 
-    function loadOptions() {
+    async function loadOptions() {
         let options = JSON.parse(window.localStorage.altNamesOptions ?? '{}');
-        $('#altFastest').prop('checked', options?.fastest ?? false);
-        $('#altAvoidTolls').prop('checked', options?.tolls ?? false);
-        $('#altAvoidFreeways').prop('checked', options?.freeways ?? false);
-        $('#altAvoidDirt').prop('checked', options?.dirt ?? false);
-        $('#altAvoidDirt').prop('checked', options?.longtrails ?? false);
-        $('#altAllowUturns').prop('checked', options?.uturns ?? false);
         $('#altHighlights').prop('checked', options?.highlights ?? false);
         $('#altSortByNode').prop('checked', options?.sortByNode ?? false);
         $('#altUseCity').prop('checked', options?.useCity ?? false);
         $('#altShowCity').prop('checked', options?.showCity ?? false);
-        changeLayerVisibility(options?.layerToggle ?? true);
+        await changeLayerVisibility(options?.layerToggle ?? true);
     }
 
     /**
@@ -700,7 +704,7 @@
      * listeners, adding map layers and running main
      * functions to check for segments loaded at init and highlighting.
      */
-    function init() {
+    async function init() {
         let css, $header, optionsHTML, $row;
 
         css = '#altTable {width: 100%;}';
@@ -734,8 +738,7 @@
 
         // Make the options menu.
         optionsHTML =
-            '<div id="altOptions"> <button id="altAutoSelect" class="altOptions-button" style="display: none;">Auto Select</button> <label style="float: right; margin: 3px;"> <input id="altHighlights" type="checkbox">Highlight Alt Names</label> <button id="altOptionsButton" class="altOptions-button" style="float: right;">Show Options</button> </div> <div id="optionsDiv"> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altShowCity">Show city name in table</label> </div> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altUseCity">Use city name in name matching</label> </div> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altSortByNode">Sort table by driving order (experimental)</label> </div> <form> <table> <thead> <tr> <td colspan="2" style="text-align: center; text-decoration: underline; font-weight: bold;">Auto Selection Route Options</td> </tr> </thead> <tbody> <tr> <td> <input type="checkbox" id="altAvoidTolls">Avoid toll roads</td> <td> <input type="checkbox" id="altAvoidFreeways">Avoid freeways</td> </tr> <tr> <td> <input type="checkbox" id="altAvoidLongDirt">Avoid long dirt roads</td> <td> <input type="checkbox" id="altAvoidDirt">Avoid dirt roads</td> </tr> <tr> <td> <input type="checkbox" id="altAllowUturns">Allow U-turns</td> <td> <input type="checkbox" id="altFastest">Fastest route</td> </tr> </tbody> </table> </form> </div>';
-        //optionsHTML = '<div id="altOptions"><label style="float: left; margin: 3px;"> <input id="altHighlights" type="checkbox">Highlight Alt Names</label> <button id="altOptionsButton" class="altOptions-button" style="float: left;">Show Options</button> </div> <div id="optionsDiv"> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altShowCity">Show city name in table</label> </div> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altUseCity">Use city name in name matching</label> </div> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altSortByNode">Sort table by driving order (experimental)</label> </div> </div>';
+            '<div id="altOptions"> <label style="float: right; margin: 3px;"> <input id="altHighlights" type="checkbox">Highlight Alt Names</label> <button id="altOptionsButton" class="altOptions-button" style="float: right;">Show Options</button> </div> <div id="optionsDiv"> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altShowCity">Show city name in table</label> </div> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altUseCity">Use city name in name matching</label> </div> <div> <label style="font-weight: normal;"> <input type="checkbox" id="altSortByNode">Sort table by driving order (experimental)</label> </div> </div>';
 
         // Make the table to hold segment information.
         $altTable = $('<table/>').attr('id', 'altTable').addClass('altTable');
@@ -752,7 +755,6 @@
         altNamesElement.append(optionsHTML);
         altNamesElement.append($altTable);
         altNamesElement.appendTo($('#WazeMap'));
-        $('#altAutoSelect').click(performAutoSelect);
         $('#altOptionsButton').click(function () {
             let $optionsDiv = $('#optionsDiv');
             if ($optionsDiv.css('display') === 'none') {
@@ -763,8 +765,8 @@
                 $(this).text('Show Options');
             }
         });
-        $('#altSortByNode').on('change', checkSelection);
-        $('#altHighlights').on('change', checkAllSegments);
+        $('#altSortByNode').on('change', () => void checkSelection());
+        $('#altHighlights').on('change', () => void checkAllSegments());
         $('#altUseCity').on('change', colorTable);
         $('#altShowCity').on('change', function () {
             if ($(this).prop('checked')) {
@@ -777,15 +779,15 @@
                 });
             }
         });
-        $('#optionsDiv input[type=checkbox], #altOptions input[type=checkbox]').on('change', saveOptions);
+        $('#optionsDiv input[type=checkbox], #altOptions input[type=checkbox]').on('change', () => void saveOptions());
         altNamesElement.on('mouseenter mouseleave', 'td.altTable-primary, td.altTable-alt', { singleSegment: false }, applyHighlighting);
         altNamesElement.on('dblclick', 'td.altTable-primary, td.altTable-alt', null, changeHighlightColor);
         altNamesElement.on('mouseenter mouseleave', 'td.altTable-id', { singleSegment: true }, applyHighlighting);
         altNamesElement.on('click', 'td.altTable-id', null, function () {
-            panToSegment($(this).text());
+            void panToSegment($(this).text());
         });
         altNamesElement.on('dblclick', 'td.altTable-id', null, function () {
-            selectSegment($(this).text());
+            void selectSegment($(this).text());
         });
 
         // Make $altDiv resizable and draggable
@@ -804,7 +806,7 @@
         }
 
         // Create the map layers for segment highlighting.
-        SDK.Map.addLayer({
+        await SDK.Map.addLayer({
             layerName: PRIMARY_LAYER,
             styleContext: {
                 getBgColor: ({ feature }) => feature?.properties?.bgColor ?? '#FFFFFF',
@@ -824,10 +826,10 @@
             ],
         });
         sdkEventSubscriptions.push(SDK.Events.on({ eventName: 'wme-layer-visibility-changed', eventHandler: (e) => {
-            if (e?.layerName === PRIMARY_LAYER) checkSelection();
+            if (e?.layerName === PRIMARY_LAYER) void checkSelection();
         }}));
 
-        SDK.Map.addLayer({
+        await SDK.Map.addLayer({
             layerName: HIGHLIGHT_LAYER,
             styleRules: [{
                 style: {
@@ -839,33 +841,39 @@
             }],
         });
 
-        AddLayerCheckbox('Scripts', 'Show Alt Names', true, changeLayerVisibility, null);
+        SDK.LayerSwitcher.addLayerCheckbox({ name: LAYER_CHECKBOX_NAME, isChecked: true });
+        sdkEventSubscriptions.push(SDK.Events.on({ eventName: 'wme-layer-checkbox-toggled', eventHandler: (e) => {
+            if (e?.name === LAYER_CHECKBOX_NAME) void changeLayerVisibility(e.checked);
+        }}));
 
         //register WME event listeners - track subscriptions for cleanup
-        sdkEventSubscriptions.push(SDK.Events.on({ eventName: 'wme-selection-changed', eventHandler: checkSelection }));
-        sdkEventSubscriptions.push(SDK.Events.on({ eventName: 'wme-map-move-end', eventHandler: checkAllSegments }));
-        sdkEventSubscriptions.push(SDK.Events.on({ eventName: 'wme-map-zoom-changed', eventHandler: checkAllSegments }));
+        sdkEventSubscriptions.push(SDK.Events.on({ eventName: 'wme-selection-changed', eventHandler: () => void checkSelection() }));
+        sdkEventSubscriptions.push(SDK.Events.on({ eventName: 'wme-map-move-end', eventHandler: () => void checkAllSegments() }));
 
         loadOptions();
         checkAllSegments();
-        checkSelection();
+        await checkSelection();
     }
 
-    function changeLayerVisibility(checked) {
-        SDK.Map.setLayerVisibility({ layerName: PRIMARY_LAYER, visibility: checked });
-        SDK.Map.setLayerVisibility({ layerName: HIGHLIGHT_LAYER, visibility: checked });
-        saveOptions();
+    async function changeLayerVisibility(checked) {
+        await SDK.Map.setLayerVisibility({ layerName: PRIMARY_LAYER, visibility: checked });
+        await SDK.Map.setLayerVisibility({ layerName: HIGHLIGHT_LAYER, visibility: checked });
+        if (SDK.LayerSwitcher.isLayerCheckboxChecked({ name: LAYER_CHECKBOX_NAME }) !== checked) {
+            SDK.LayerSwitcher.setLayerCheckboxChecked({ name: LAYER_CHECKBOX_NAME, isChecked: checked });
+        }
+        await saveOptions();
     }
 
     /**
      * Cleanup function to prevent memory leaks on script reload/unload.
      * Unsubscribes from all SDK events, clears DOM elements, and resets global state.
      */
-    function cleanup() {
-        // Unsubscribe from all SDK events
-        sdkEventSubscriptions.forEach(subscription => {
-            if (subscription && typeof subscription.remove === 'function') {
-                subscription.remove();
+    async function cleanup() {
+        // Unsubscribe from all SDK events.
+        // SDK.Events.on() returns a cleanup FUNCTION (not an object with .remove()).
+        sdkEventSubscriptions.forEach(unsubscribe => {
+            if (typeof unsubscribe === 'function') {
+                unsubscribe();
             }
         });
         sdkEventSubscriptions = [];
@@ -892,8 +900,8 @@
         // Remove map layers
         if (SDK) {
             try {
-                SDK.Map.removeAllFeaturesFromLayer({ layerName: PRIMARY_LAYER });
-                SDK.Map.removeAllFeaturesFromLayer({ layerName: HIGHLIGHT_LAYER });
+                await SDK.Map.removeAllFeaturesFromLayer({ layerName: PRIMARY_LAYER });
+                await SDK.Map.removeAllFeaturesFromLayer({ layerName: HIGHLIGHT_LAYER });
             } catch (e) {
                 console.debug('Error removing features during cleanup:', e);
             }
@@ -902,77 +910,10 @@
         isInitialized = false;
     }
 
-    function AddLayerCheckbox(group, checkboxText, checked, callback) {
-        group = group.toLowerCase();
-        let normalizedText = checkboxText.toLowerCase().replace(/\s/g, '_');
-        let checkboxID = 'layer-switcher-item_' + normalizedText;
-        let groupPrefix = 'layer-switcher-group_';
-        let groupClass = groupPrefix + group.toLowerCase();
-        sessionStorage[normalizedText] = checked;
-
-        let CreateParentGroup = function (groupChecked) {
-            let groupList = $('.layer-switcher').find('.list-unstyled.togglers');
-            let checkboxText = group.charAt(0).toUpperCase() + group.substr(1);
-            let newLI = $('<li class="group">');
-            newLI.html(
-                [
-                    '<div class="layer-switcher-toggler-tree-category">',
-                    // '<wz-button color="clear-icon" size="xs">',
-                    // '<i class="toggle-category w-icon w-icon-caret-down"></i>',
-                    // '</wz-button>',
-                    '<wz-toggle-switch disabled="false" class="' + groupClass + '" id="' + groupClass + '" ' + (groupChecked ? 'checked' : '') + ' name value>',
-                    '</wz-toggle-switch>',
-                    '<label class="label-text" for="' + groupClass + '">' + checkboxText + '</label>',
-                    '</div>',
-                    '<ul class="collapsible-GROUP_' + group.toUpperCase() + '"></ul>',
-                    '</li>',
-                ].join(' ')
-            );
-
-            groupList.append(newLI);
-            $('#' + groupClass).change(function () {
-                sessionStorage[groupClass] = this.checked;
-            });
-        };
-
-        if (group !== 'issues' && group !== 'places' && group !== 'road' && group !== 'display')
-            if ($('.' + groupClass).length === 0) {
-                //"non-standard" group, check its existence
-                //Group doesn't exist yet, create it
-                let isParentChecked = typeof sessionStorage[groupClass] == 'undefined' ? true : sessionStorage[groupClass] == 'true';
-                CreateParentGroup(isParentChecked); //create the group
-                sessionStorage[groupClass] = isParentChecked;
-            }
-
-        let buildLayerItem = function (isChecked) {
-            let groupChildren = $('.collapsible-GROUP_' + group.toUpperCase());
-            let $li = $('<li>');
-            $li.html(['<wz-checkbox id="' + checkboxID + '" class="hydrated">', checkboxText, '</wz-checkbox>'].join(' '));
-
-            groupChildren.append($li);
-            $('#' + checkboxID).prop('checked', isChecked);
-            $('#' + checkboxID).change(function () {
-                callback(this.checked);
-                sessionStorage[normalizedText] = this.checked;
-            });
-            if (!$('#' + groupClass).prop('checked')) {
-                $('#' + checkboxID).prop('disabled', true);
-                callback(false);
-            }
-
-            $('#' + groupClass).change(function () {
-                $('#' + checkboxID).prop('disabled', !this.checked);
-                callback(!this.checked ? false : sessionStorage[normalizedText] == 'true');
-            });
-        };
-
-        buildLayerItem(checked);
-    }
-
     function scriptupdatemonitor() {
-    if (WazeToastr?.Ready) {
+    if (WazeWrap?.Ready) {
         // Create and start the ScriptUpdateMonitor
-        const updateMonitor = new WazeToastr.Alerts.ScriptUpdateMonitor(
+        const updateMonitor = new WazeWrap.Alerts.ScriptUpdateMonitor(
         scriptName,
         scriptVersion,
         downloadUrl,
@@ -981,13 +922,13 @@
         updateMonitor.start(2, true); // Check every 2 hours, check immediately
 
         // Show the update dialog for the current version
-        WazeToastr.Interface.ShowScriptUpdate(scriptName, scriptVersion, updateMessage, downloadUrl, forumURL);
+        WazeWrap.Interface.ShowScriptUpdate(scriptName, scriptVersion, updateMessage, downloadUrl, forumURL);
     } else {
         setTimeout(scriptupdatemonitor, 250);
     }
     }
 
-    function bootstrap() {
+    async function bootstrap() {
         // Prevent duplicate initialization
         if (isInitialized) {
             console.debug(`${scriptName}: Already initialized, skipping bootstrap`);
@@ -995,18 +936,20 @@
         }
 
         try {
+            // Sync mode is on WME's deprecation path — opt in to async mode now.
             SDK = unsafeWindow.getWmeSdk({
+                mode: 'async',
                 scriptId: 'WMEShowAltNames',
                 scriptName: scriptName,
             });
 
-            if (SDK.State.isReady()) {
-                init();
+            if (await SDK.State.isReady()) {
+                await init();
                 isInitialized = true;
             } else {
-                SDK.Events.once({ eventName: 'wme-ready' }).then(() => {
+                SDK.Events.once({ eventName: 'wme-ready' }).then(async () => {
                     if (!isInitialized) {
-                        init();
+                        await init();
                         isInitialized = true;
                     }
                 });
@@ -1031,6 +974,15 @@
 
 /*Changelog*/
 /*
+2026.10.14.01 -
+    - Migrated to the WME SDK async mode (sync is on the deprecation path).
+    - Faster highlighting: uses redrawLayer() with mutable style state instead of
+      removing/re-adding features.
+    - Replaced the hand-rolled layer checkbox with the native SDK LayerSwitcher.
+    - Address lookup now uses Segments.getAddress() (single call), and road type
+      labels use Segments.getRoadTypes().
+    - Fixed an SDK event-listener leak in cleanup() (Events.on returns a function).
+    - Removed dead route auto-select code.
 2026.04.16.00 -
     - Initial release after migration to SDK and rewrite.
 */
